@@ -1,1 +1,2 @@
-python3 client.py
+ssh robot@ev3dev.local
+ssh robot@192.168.0.2

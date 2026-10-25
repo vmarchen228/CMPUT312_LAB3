@@ -1,3 +1,4 @@
+#LAB 2
 #!/usr/bin/env python3
 import time, math
 from ev3dev2.motor import  LargeMotor, OUTPUT_A, OUTPUT_B, SpeedPercent

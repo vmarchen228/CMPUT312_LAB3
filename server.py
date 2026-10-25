@@ -51,6 +51,22 @@ port = 9999
 server = Server(host, port)
 queue = Queue()
 
+
 while True:
-    time.sleep(10)
-    server.sendAngles(10, 10, queue)
+    user_input = input("Enter s for stationary target, or m for moving target (or q): ")
+
+    if user_input.lower() == "s":
+        
+        break
+
+    elif user_input.lower() == "m":
+        
+        break
+
+    elif user_input.lower() == "q":
+        server.sendTermination()
+        break
+
+    else:
+        print("Invalid command. Please try again.")
+    

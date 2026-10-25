@@ -1,0 +1,58 @@
+PART 1 - HOW TO RUN THE LINE DRAWING (no server needed)
+
+Everything runs on the brick. The PC is only used to copy the file and ssh in.
+
+1. Upload the file to the brick (PC terminal, in the folder with the file):
+   scp vibekoding_robert.py robot@ev3dev.local:~/VSMaterial/
+   password: maker
+
+2. ssh into the brick:
+   ssh robot@ev3dev.local
+   password: maker
+   cd VSMaterial
+
+3. Run it:
+   python3 vibekoding_robert.py
+
+4. Put the arm in the zero position (theta1 = 0, theta2 = 0), press Enter.
+
+5. Enter the line as four numbers in cm:
+   x1 y1 x2 y2
+   example: 14 5 14 -5
+
+6. The arm moves to the start point with the pen lifted.
+   Put the pen down, press Enter. It draws the line.
+
+7. Enter another line, or q to quit.
+
+If you edit vibekoding_robert.py on the PC, upload it again (step 1).
+
+==============================================================================
+
+PART 2 - HOW TO START THE SERVER AND CLIENT
+
+PC = 192.168.0.2 (server)
+Brick = 192.168.0.1 (client)
+Port = 9999
+
+1. PC terminal:
+   cd ~/Documents/LAB3/VSMaterial
+
+2. Second PC terminal, ssh into the brick:
+   ssh robot@ev3dev.local
+   password: maker
+   cd VSMaterial
+
+3. Start the server on the PC FIRST:
+   python3 server.py
+
+4. Then start the client on the brick:
+   python3 client.py
+
+If the brick says "Connection refused", the server wasn't running yet.
+Start server.py first, then client.py again.
+
+Stop both with Ctrl+C.
+
+Copy an edited file to the brick (from the PC):
+   scp client.py robot@ev3dev.local:~/VSMaterial/
