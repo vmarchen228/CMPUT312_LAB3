@@ -12,7 +12,7 @@ Everything runs on the brick. The PC is only used to copy the file and ssh in.
    cd VSMaterial
 
 3. Run it:
-   python3 vibekoding_robert.py
+   python3 LAB3_PART1.py
 
 4. Put the arm in the zero position (theta1 = 0, theta2 = 0), press Enter.
 
@@ -25,7 +25,7 @@ Everything runs on the brick. The PC is only used to copy the file and ssh in.
 
 7. Enter another line, or q to quit.
 
-If you edit vibekoding_robert.py on the PC, upload it again (step 1).
+If you edit LAB3_PART1.py on the PC, upload it again (step 1).
 
 ==============================================================================
 

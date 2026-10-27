@@ -1,2 +1,270 @@
-ssh robot@ev3dev.local
-ssh robot@192.168.0.2
+**Setup: tracking.** The functions `find_marker`, `read_frame` and `measure_markers` find the blue sticker and the red target in each camera frame. Each frame is converted to HSV and masked by colour, and erode and dilate clean up the mask. The centre of each marker is computed from image moments as u = m10/m00 and v = m01/m00. Each measurement discards 5 old frames and averages 5 new ones to reduce jitter.
+
+**Communication.** The laptop runs a TCP server (`connect_to_brick`), and the brick connects to it as a client. `move_joints` sends a relative move "Δθ1,Δθ2" and waits for the brick to reply "DONE". While waiting, it keeps reading camera frames so the video doesn't freeze.
+
+---
+
+**Q2.1.** We estimated J by finite differences: from the start pose we turned only θ1 by 10°, measured the sticker's pixel change (Δu, Δv), and moved back, then did the same for θ2. Dividing each pixel change by 10° gives J in pixels per degree. Each column describes one joint: column 1 is how the end effector moves in the image per degree of θ1, and column 2 is the same for θ2. Each row describes one image direction: row 1 is the horizontal coordinate u, and row 2 is the vertical coordinate v. Moving back after each probe ensures both columns describe J at the same pose.
+
+**Q2.2.** We stop when the image distance between the end effector and the target centre, sqrt(error_u² + error_v²), is under 10 pixels, with a limit of 50 iterations for stationary targets. The tolerance sets the final accuracy, because the loop stops as soon as the error is below it. A smaller tolerance is more accurate but needs more iterations, and it may never be reached because of detection noise, motor resolution and gear backlash. A larger tolerance converges faster but stops farther from the target. The criterion is in pixels and measures the sticker centre, not the pen tip, so the physical accuracy also depends on the camera scale and the sticker's offset from the tip.
+
+**Q2.3.** J is only accurate near the pose where it was measured, so after every move we correct it using what actually happened: J_new = J + α·(Δy − J·Δq)·Δqᵀ / (Δqᵀ·Δq). Here Δq is the joint move we sent, Δy is the pixel change the camera observed, and Δy − J·Δq is how wrong J's prediction was. The update is the smallest change to J that would have predicted that move correctly, and it only changes J in the direction the arm moved. With α = 0.5, only half the correction is applied, and moves under 2 px are skipped, so noise can't ruin J. This lets J follow the arm as its pose changes, which keeps the steps pointing at the target without re-probing.
+
+**Q2.4.** Over [N] trials at [3] targets, the mean final error was [__] px (≈ [__] cm), and errors for the same target varied by [__] px, so repeatability was [good/moderate]; convergence took [__] iterations on average. The main error sources were colour-detection jitter from lighting, partial occlusion of the target dot near convergence, motor error (up to 3°) and backlash in the 40/24 gears, and Broyden using the commanded rather than the actual joint move. Linearisation error also mattered, especially for large steps or a nearly straight arm. The difficulties we encountered were [list only the ones you actually had, e.g. camera setup, HSV tuning, video freezing while waiting for the brick, probes failing near joint limits].
+
+**Q2.5.** With a moving target, the arm followed the dot but lagged behind it [observed: about __ iterations or __ s], because the target is measured only once per iteration and each step covers only half the remaining error. While the target moved, the error stayed larger than in the stationary runs (up to [__] px), and it dropped below 5 px only after the target stopped. We saw [little / some] oscillation; the 0.5 gain and the 15° step cap limit overshoot, but a sudden jump of the target can make J inaccurate for a few steps. Small target moves near the arm were also ignored until they exceeded the 40 px occlusion radius, which delayed the reaction.
+
+
+KINEMATICS
+--------------------------------------
+
+Q: Write the forward kinematics of your arm.
+A: x = L1*cos(theta1) + L2*cos(theta1 + theta2)
+   y = L1*sin(theta1) + L2*sin(theta1 + theta2)
+   Link 1 points at theta1. Link 2 is at theta1 + theta2, because theta2 is measured
+   relative to link 1. Add up the x and y components of both links.
+
+Q: How do you get theta2 in inverse kinematics?
+A: Law of cosines on the triangle formed by L1, L2 and the line from base to target:
+   cos(theta2) = (x^2 + y^2 - L1^2 - L2^2) / (2*L1*L2)
+   If this is outside [-1, 1], no such triangle exists, so the point is unreachable.
+
+Q: And theta1?
+A: theta1 = atan2(y, x) - atan2(L2*sin(theta2), L1 + L2*cos(theta2))
+   First term: direction to the target.
+   Second term: how much link 1 must be rotated back because the elbow is bent.
+
+Q: Why atan2 and not atan?
+A: atan(y/x) can't tell opposite quadrants apart: (1, 1) and (-1, -1) give the same ratio.
+   atan2 uses the signs of both arguments, so it returns the correct angle in -180..180 degrees.
+
+Q: Why are there two IK solutions?
+A: For a reachable point the elbow can bend either way (elbow-up / elbow-down), because
+   +acos and -acos give the same cos(theta2). We plan the whole line with one elbow sign
+   so the arm never flips between solutions mid-line.
+
+Q: How does the gear coupling enter the math?
+A: The bottom motor drives joint 2 through 40/24 gears, but it also turns when joint 1 moves.
+   theta2 = (bottom_motor_angle - theta1) * 24/40
+   bottom_motor_target = theta1 + (40/24) * theta2
+
+Q: Why interpolate the line in x-y instead of moving the joints from start to end?
+A: Forward kinematics is nonlinear (sines and cosines), so moving the joints linearly makes
+   the pen trace a curve. We split the line into points 0.25 cm apart in x-y and solve IK
+   for each one, so the pen follows the line with only tiny curved segments between points.
+
+Q: Why choose analytical IK instead of Newton for line drawing?
+A: A 2-link arm has a closed-form solution: exact, one step, can't fail to converge.
+   We can choose the elbow configuration and keep it for the whole line.
+   Newton may jump to the other elbow solution mid-line, and it becomes unstable near
+   full extension where det(J) = L1*L2*sin(theta2) goes to zero.
+
+Q: How does step size affect the drawn line?
+A: Smaller steps give a straighter line (shorter curved segments between points), but more
+   moves, so slower drawing, and motor jitter / start-stop effects add up over more segments.
+
+
+THE JACOBIAN
+------------
+
+Q: What is a Jacobian?
+A: The matrix of first derivatives that linearly approximates a nonlinear function near a
+   point: d_output ~= J * d_input.
+   For visual servoing: inputs = 2 joint angles, outputs = 2 pixel coordinates (u, v),
+   so J is 2x2, in pixels per degree.
+
+         J = [ du/dtheta1   du/dtheta2 ]
+             [ dv/dtheta1   dv/dtheta2 ]
+
+   Columns = joints (column 1 = effect of theta1, column 2 = effect of theta2).
+   Rows = image directions (row 1 = u, horizontal; row 2 = v, vertical).
+
+Q: What are u and v?
+A: Pixel coordinates in the camera image. u = column (increases to the right),
+   v = row (increases DOWNWARD), origin at the top-left corner.
+
+Q: What is the arm's own (kinematic) Jacobian?
+A: Differentiate the forward kinematics:
+   dx/dtheta1 = -L1*sin(theta1) - L2*sin(theta1 + theta2)
+   dx/dtheta2 = -L2*sin(theta1 + theta2)
+   dy/dtheta1 =  L1*cos(theta1) + L2*cos(theta1 + theta2)
+   dy/dtheta2 =  L2*cos(theta1 + theta2)
+
+Q: How does the image Jacobian relate to it?
+A: Image Jacobian ~= (camera's table-to-image map) x (arm Jacobian).
+   We never compute either factor; we measure their product directly. That's why no camera
+   calibration or link lengths are needed ("uncalibrated").
+
+Q: Why estimate J instead of computing it from the formula?
+A: Computing it needs the camera's position, orientation and scale plus exact link lengths.
+   Any error in those biases every step. Measuring J from the image includes all of it.
+
+Q: How did you estimate the initial J?
+A: Finite differences. Turn only theta1 by 10 degrees, measure (du, dv), move back.
+   Repeat for theta2. Divide each pixel change by 10 degrees -> one column each.
+   Moving back makes both columns describe J at the same pose.
+
+Q: Why 10 degrees?
+A: Too small: pixel noise dominates the measured movement.
+   Too large: J changes during the probe, so we measure an average, not J at the start pose.
+
+Q: Why does J need updating?
+A: J contains terms like sin(theta1 + theta2) that change as the arm moves.
+   J measured at the start pose becomes wrong at other poses.
+
+Q: When is J singular, and what does it mean physically?
+A: det(arm Jacobian) = L1*L2*sin(theta2) = 0 when theta2 = 0 (straight) or 180 (folded).
+   Then both joints move the tip in the same direction (sideways), and nothing can move it
+   along the arm. J can't be inverted, and steps near that pose blow up.
+
+
+BROYDEN UPDATE
+--------------
+
+Q: What is the formula?
+A: J_new = J + alpha * (dy - J*dq) * dq^T / (dq^T * dq)
+   dq = joint move sent, dy = pixel change observed, J*dq = what J predicted,
+   (dy - J*dq) = prediction error.
+
+Q: What problem does Broyden solve?
+A: It updates J from motion we already made, without stopping to re-probe,
+   using only the latest move and its result.
+
+Q: What is the secant condition?
+A: After a move dq that produced image change dy, we want J_new * dq = dy,
+   meaning J_new would have predicted that move exactly. With alpha = 1, Broyden satisfies it.
+
+Q: Infinitely many J satisfy that. Why this one?
+A: Broyden's update is the one that changes J the LEAST (smallest Frobenius norm change).
+   It only changes J's response along dq and leaves perpendicular directions untouched,
+   because we have no new information about them.
+
+Q: Why divide by dq^T * dq?
+A: Normalization. Without it the correction scales with the square of the step size.
+   With it, the corrected J predicts dy correctly whether the move was 1 or 10 degrees.
+
+Q: Why alpha = 0.5 instead of 1?
+A: Every measurement has pixel noise and motor error. Applying half the correction averages
+   over several moves, so one bad measurement can't corrupt J. Cost: slower adaptation.
+
+Q: Why skip the update for moves under 2 pixels?
+A: There the measured pixel change is mostly detection noise, and dividing noise by a small
+   move would corrupt J.
+
+
+CONTROL LAW
+-----------
+
+Q: How do you compute the joint move?
+A: We want J * dq = e, where e = target - sticker (pixel error). So dq = J^-1 * e.
+   2x2 inverse: inv([a b; c d]) = [d -b; -c a] / (a*d - b*c)
+
+Q: What method is that?
+A: Newton's method for solving "image position - target = 0".
+   Same update as numerical IK in lab 2, but J comes from the camera, not a formula.
+
+Q: Why multiply by GAIN = 0.5?
+A: J is only a linear approximation, so a full step can overshoot.
+   With gain lambda and a perfect J: e_next = (1 - lambda) * e.
+   lambda = 0.5 halves the error each iteration (exponential convergence, no overshoot).
+   lambda > 1 overshoots; lambda near 2 or more diverges.
+
+Q: How many iterations should it take?
+A: With perfect J, error after k steps = e0 * 0.5^k.
+   From 100 px to under 5 px: 0.5^k < 0.05, so k ~= 5.
+   In practice more, because J isn't perfect and motors have errors.
+
+Q: Why scale both joints by the same factor when capping the step?
+A: Scaling the whole vector keeps the ratio dtheta1 : dtheta2, so the sticker still moves
+   toward the target, just less far. Clipping each joint separately changes the direction.
+
+Q: What stopping criterion did you use?
+A: Stop when sqrt(error_u^2 + error_v^2) < 10 pixels. Give up after 50 iterations.
+   Smaller tolerance = more accurate but more iterations, and may never be reached because
+   of noise, motor resolution and backlash. Larger tolerance = faster but less accurate.
+
+Q: What would you do if J weren't square (e.g. 3 joints)?
+A: Use the pseudoinverse: J+ = J^T * (J * J^T)^-1 (more joints than outputs).
+   It gives the smallest joint move that achieves the pixel change.
+
+
+MOVING TARGET AND ACCURACY
+--------------------------
+
+Q: Why does the arm lag behind a moving target?
+A: It's a proportional controller: each step closes only half the current error, and the
+   target is sampled only once per iteration. Proportional control of a target moving at
+   constant speed always leaves a trailing error. Fix: estimate target velocity and add it
+   to the step (feed-forward).
+
+Q: Why is the stopping criterion in pixels, not centimetres?
+A: The camera only gives pixels, and the method is uncalibrated (no pixel-to-cm conversion).
+   Convert afterwards by measuring how many pixels 1 cm covers in the image.
+
+Q: Main error sources?
+A: - Colour detection jitter (lighting, reflections, HSV ranges)
+   - Partial occlusion of the target dot near convergence
+   - Motor error (up to 3 degrees accepted) and backlash in the 40/24 gears
+   - Broyden uses the commanded joint move, not the actual one
+   - Linearisation error (large steps, poses near a straight arm)
+   - Sticker centre is not exactly the end-effector tip; camera perspective
+
+
+PART 3 (3D)
+-----------
+
+Q: What changes in 3D?
+A: The task error becomes 3D, so depth is needed. One camera gives only (u, v), so use two
+   cameras (stereo, 4 image coordinates) or a depth camera. The arm needs at least 3 joints
+   to reach points in 3D.
+
+Q: What are the Jacobian dimensions then?
+A: (number of image measurements) x (number of joints), e.g. 2 cameras + 3 joints = 4x3.
+   Not square, so solve the step with the pseudoinverse (least squares).
+   Broyden works the same, with bigger matrices. Initial J needs one probe per joint.
+
+
+IF YOU ONLY MEMORIZE THREE THINGS
+---------------------------------
+1. dy ~= J * dq.  Columns = joints, rows = u and v.
+2. Broyden = smallest change to J that matches the last observed move.
+3. dq = GAIN * J^-1 * e is a damped Newton step: with a perfect J, error halves each iteration.
+
+
+
+Q: What is Visual Servoing?
+A: Visual servoing is controlling a robot with feedback from a camera: it moves a little, looks at how far it still is from the target, corrects, and repeats until it gets there. "Uncalibrated" means it doesn't know where the camera is or how pixels map to real distances, so it learns that relationship (the Jacobian) from small test moves and keeps refining it as it goes.
+
+Q: What error is minimized?
+A: Each step, the program measures how far apart the two markers look on screen (left/right and up/down) and moves the joints to make that gap smaller, stopping once it’s under 10 pixels. It never minimizes an error in centimetres or in joint angles, only in what the camera sees, which is why it’s called image-space error.
+
+Q: How do you get to a position?
+A: The camera measures the pixel gap between the sticker and the target, and we solve J * dq = error to find which joint move closes that gap. We take half of that move, look again, and repeat until the gap is under 10 pixels.
+
+Q: What does the Broyden update do?
+A: After each move it compares how far the sticker actually moved with how far J predicted, and nudges J to fix the difference. It makes the smallest change that matches the last move, so J stays accurate as the arm moves without re-probing.
+
+Q: Which is faster, Broyden or Newton?
+A: Newton needs fewer steps, but it needs the true Jacobian at every step, which here would mean two extra probe moves each iteration. Broyden reuses the motion it already made to update J for free, so on a real robot Broyden is faster overall.
+
+Q: Convergence of Newton vs Broyden - what kind?
+A: Newton with an exact Jacobian converges QUADRATICALLY near the target: the error roughly squares each step (0.1 -> 0.01 -> 0.0001). Broyden converges SUPERLINEARLY: faster than linear, but slower than quadratic, because its J is only an estimate.
+
+Note about OUR code: we multiply each step by GAIN = 0.5, so in practice it converges
+LINEARLY - the error roughly halves each iteration (100 -> 50 -> 25 -> 12 px). We trade
+speed for stability, because the damping prevents overshoot when J is inaccurate.
+
+Q: Does the camera need to be perpendicular or parallel to the workspace?
+A: No specific orientation is required. Uncalibrated visual servoing measures J from the
+   image, so whatever angle the camera has is built into J automatically.
+   ("Looking straight down" means the viewing direction is perpendicular to the table and
+   the image plane is parallel to it - both words describe the same setup.)
+
+Q: Then what orientation works best?
+A: Roughly looking down. J stays closer to constant across the workspace, the arm is less
+   likely to block the target, and each pixel of error is a smaller real distance.
+
+Q: What does the camera actually need?
+A: Both markers visible the whole time, and the camera fixed during a run. It also must not
+   look edge-on along the table, because then motion toward/away from it barely changes the
+   image, J becomes nearly singular, and the arm can't be steered in that direction.
